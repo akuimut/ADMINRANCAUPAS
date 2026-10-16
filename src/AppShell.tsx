@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { Capacitor } from '@capacitor/core'
 import { Activity, ArrowDownLeft, ArrowDownRight, ArrowUpRight, BarChart3, Bell, Boxes, CalendarDays, Check, CircleDollarSign, ClipboardList, Download, FileDown, FileText, LayoutDashboard, Menu, Moon, MoreHorizontal, Package, Plus, Search, Settings2, ShieldCheck, ShoppingBag, Sun, Trash2, TrendingUp, Users, Wallet, X } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { jsPDF as JsPdf } from 'jspdf'
-import { db, defaultSettings, type CompanySettings, type Customer, type Invoice, type InvoiceItem, type Product, type Transaction } from './db/database'
-import { addTransaction, csvDownload, customerDraft, exportBackup, formatDate, formatMoney, invoiceStatus, productDraft, recordPayment, restoreBackup, saveInvoice, today, totals, updateInvoice } from './services/business'
+import { defaultSettings, type CompanySettings, type Customer, type Invoice, type InvoiceItem, type Product, type Transaction } from './db/database'
+import { addTransaction, csvDownload, customerDraft, downloadBlob, exportLegacyLocalBackup, formatDate, formatMoney, invoiceStatus, productDraft, recordPayment, saveInvoice, today, totals, updateInvoice } from './services/business'
+import { deleteCloudCustomer, deleteCloudInvoice, exportCloudBackup, getCloudInvoice, loadCloudWorkspace, saveCloudCustomer, saveCloudProduct, saveCloudSettings, setCloudProductActive } from './services/cloud'
+import { supabase } from './lib/supabase'
 import logoUrl from '../Stylized Deer Mountain Emblem.png'
 import './app-layout.css'
 
@@ -19,7 +22,7 @@ const navigation: Array<{ label: Page; icon: typeof LayoutDashboard; group: stri
 const statusText: Record<string, string> = { draft: 'Draft', unpaid: 'Belum dibayar', partial: 'Dibayar sebagian', paid: 'Lunas', overdue: 'Jatuh tempo', cancelled: 'Dibatalkan' }
 const longDate = new Intl.DateTimeFormat('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 
-function AppShell() {
+function AppShell({ onSignOut }: { onSignOut: () => void }) {
   const [page, setPage] = useState<Page>('Dashboard')
   const [customers, setCustomers] = useState<Customer[]>([])
   const [products, setProducts] = useState<Product[]>([])
@@ -41,25 +44,49 @@ function AppShell() {
   const [range, setRange] = useState('month')
 
   async function refresh() {
-    const [customerRows, productRows, invoiceRows, transactionRows, company] = await Promise.all([db.customers.toArray(), db.products.toArray(), db.invoices.toArray(), db.transactions.toArray(), db.settings.get('company')])
-    setCustomers(customerRows); setProducts(productRows); setInvoices(invoiceRows.sort((a, b) => b.issueDate.localeCompare(a.issueDate)))
-    setTransactions(transactionRows.sort((a, b) => b.date.localeCompare(a.date))); setSettings({ ...defaultSettings, ...company })
+    const workspace = await loadCloudWorkspace()
+    setCustomers(workspace.customers); setProducts(workspace.products); setInvoices(workspace.invoices)
+    setTransactions(workspace.transactions); setSettings(workspace.settings)
   }
   useEffect(() => {
     let active = true
     async function load() {
       try {
-        const [customerRows, productRows, invoiceRows, transactionRows, company] = await Promise.all([db.customers.toArray(), db.products.toArray(), db.invoices.toArray(), db.transactions.toArray(), db.settings.get('company')])
+        const workspace = await loadCloudWorkspace()
         if (!active) return
-        setCustomers(customerRows); setProducts(productRows); setInvoices(invoiceRows.sort((a, b) => b.issueDate.localeCompare(a.issueDate)))
-        setTransactions(transactionRows.sort((a, b) => b.date.localeCompare(a.date))); setSettings({ ...defaultSettings, ...company })
-      } catch { if (active) setToast({ message: 'Database lokal tidak dapat dibuka.', kind: 'error' }) }
+        setCustomers(workspace.customers); setProducts(workspace.products); setInvoices(workspace.invoices)
+        setTransactions(workspace.transactions); setSettings(workspace.settings)
+      } catch (error) { if (active) setToast({ message: error instanceof Error ? error.message : 'Data Supabase tidak dapat dimuat.', kind: 'error' }) }
       finally { if (active) setLoading(false) }
     }
     void load()
     return () => { active = false }
   }, [])
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(null), 3600); return () => window.clearTimeout(timer) }, [toast])
+  useEffect(() => {
+    const client = supabase
+    if (!client) return
+    let active = true
+    let timer = 0
+    const reload = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        void loadCloudWorkspace().then((workspace) => {
+          if (!active) return
+          setCustomers(workspace.customers); setProducts(workspace.products); setInvoices(workspace.invoices)
+          setTransactions(workspace.transactions); setSettings(workspace.settings)
+        }).catch((error: unknown) => {
+          if (active) setToast({ message: error instanceof Error ? error.message : 'Sinkronisasi gagal.', kind: 'error' })
+        })
+      }, 120)
+    }
+    let channel = client.channel('rancaupas-workspace-updates')
+    for (const table of ['customers', 'products', 'invoices', 'invoice_items', 'payments', 'transactions', 'company_settings']) {
+      channel = channel.on('postgres_changes', { event: '*', schema: 'public', table }, reload)
+    }
+    channel.subscribe()
+    return () => { active = false; window.clearTimeout(timer); void client.removeChannel(channel) }
+  }, [])
   function notify(message: string, kind: 'success' | 'error' = 'success') { setToast({ message, kind }) }
   async function act(action: () => Promise<unknown>, message: string) {
     try { await action(); await refresh(); notify(message) } catch (error) { notify(error instanceof Error ? error.message : 'Terjadi kesalahan saat menyimpan data.', 'error') }
@@ -95,8 +122,8 @@ function AppShell() {
     if (!name) return notify('Nama pelanggan wajib diisi.', 'error')
     const now = new Date().toISOString()
     const fields = { name, companyName: String(form.get('companyName') ?? ''), phone: String(form.get('phone') ?? ''), email: String(form.get('email') ?? ''), address: String(form.get('address') ?? ''), notes: String(form.get('notes') ?? ''), updatedAt: now }
-    if (editingCustomer?.id) await act(() => db.customers.update(editingCustomer.id!, fields), 'Pelanggan diperbarui.')
-    else await act(() => db.customers.add({ ...customerDraft(name, `CUS-${Date.now().toString().slice(-6)}`), ...fields, createdAt: now }), 'Pelanggan tersimpan.')
+    if (editingCustomer?.id) await act(() => saveCloudCustomer({ ...editingCustomer, ...fields }), 'Pelanggan diperbarui.')
+    else await act(() => saveCloudCustomer({ ...customerDraft(name, `CUS-${Date.now().toString().slice(-6)}`), ...fields, createdAt: now }), 'Pelanggan tersimpan.')
     setModal(null); setEditingCustomer(null)
   }
   async function saveProduct(event: FormEvent<HTMLFormElement>) {
@@ -104,8 +131,8 @@ function AppShell() {
     const costPrice = Number(form.get('costPrice') || 0); const stock = Number(form.get('stock') || 0)
     if (!name || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(costPrice) || costPrice < 0 || !Number.isFinite(stock) || stock < 0) return notify('Nama, harga, modal, atau stok tidak valid.', 'error')
     const fields = { name, sellingPrice: price, costPrice, stock, category: String(form.get('category') || 'Umum'), unit: String(form.get('unit') || 'pcs'), description: String(form.get('description') || ''), updatedAt: new Date().toISOString() }
-    if (editingProduct?.id) await act(() => db.products.update(editingProduct.id!, fields), 'Produk diperbarui.')
-    else await act(() => db.products.add({ ...productDraft(name, `PRD-${Date.now().toString().slice(-6)}`, price), ...fields }), 'Produk tersimpan.')
+    if (editingProduct?.id) await act(() => saveCloudProduct({ ...editingProduct, ...fields }), 'Produk diperbarui.')
+    else await act(() => saveCloudProduct({ ...productDraft(name, `PRD-${Date.now().toString().slice(-6)}`, price), ...fields }), 'Produk tersimpan.')
     setModal(null); setEditingProduct(null)
   }
   async function saveManualTransaction(event: FormEvent<HTMLFormElement>) {
@@ -118,14 +145,14 @@ function AppShell() {
     event.preventDefault()
     if (!items.length || items.some((item) => !item.description.trim() || item.quantity <= 0 || item.unitPrice < 0 || item.discount < 0)) return notify('Item memerlukan deskripsi, kuantitas, dan harga yang valid.', 'error')
     const form = new FormData(event.currentTarget); const type = String(form.get('type') ?? 'sale') as 'sale' | 'purchase'
-    const customerId = form.get('customerId') ? Number(form.get('customerId')) : undefined; const customer = customers.find((item) => item.id === customerId)
+    const customerId = String(form.get('customerId') || '') || undefined; const customer = customers.find((item) => item.id === customerId)
     const partyName = String(form.get('partyName') ?? customer?.name ?? '').trim()
     if (!partyName) return notify('Nama pelanggan atau pemasok wajib diisi.', 'error')
     const discount = parseMoneyInput(String(form.get('discount') || '')); const taxPercent = Number(form.get('tax') || 0)
     if (discount < 0 || taxPercent < 0 || taxPercent > 100) return notify('Diskon atau pajak tidak valid.', 'error')
     const calculated = totals(items, discount, taxPercent); const issueDate = String(form.get('issueDate') || today()); const dueDate = String(form.get('dueDate') || '')
     if (dueDate && dueDate < issueDate) return notify('Tanggal jatuh tempo tidak boleh sebelum tanggal invoice.', 'error')
-    const input = { type, customerId, partyName, partyAddress: String(form.get('partyAddress') || customer?.address || ''), partyPhone: String(form.get('partyPhone') || customer?.phone || ''), issueDate, dueDate, items, subtotal: calculated.subtotal, discount, tax: calculated.tax, total: calculated.total, amountPaid: 0, balanceDue: calculated.total, status: 'unpaid' as const, notes: String(form.get('notes') || '') }
+    const input = { type, customerId, partyName, partyAddress: String(form.get('partyAddress') || customer?.address || ''), partyPhone: String(form.get('partyPhone') || customer?.phone || ''), issueDate, dueDate, items, subtotal: calculated.subtotal, discount, tax: calculated.tax, taxPercent, total: calculated.total, amountPaid: 0, balanceDue: calculated.total, status: 'unpaid' as const, notes: editingInvoice?.notes ?? '' }
     try {
       if (editingInvoice?.id) await updateInvoice(editingInvoice.id, input)
       else await saveInvoice(input, type)
@@ -142,20 +169,45 @@ function AppShell() {
   async function removeInvoice(invoice: Invoice) {
     if (!invoice.id || !window.confirm(`Hapus invoice ${invoice.invoiceNumber}?`)) return
     if (invoice.amountPaid > 0) return notify('Invoice dengan pembayaran tercatat tidak dapat dihapus.', 'error')
-    await act(() => db.invoices.delete(invoice.id!), 'Invoice dihapus.')
+    await act(() => deleteCloudInvoice(String(invoice.id)), 'Invoice dihapus.')
   }
   async function toggleCustomer(customer: Customer) {
     if (!customer.id) return
     const used = invoices.some((invoice) => invoice.customerId === customer.id)
     if (!window.confirm(used ? 'Data ini digunakan invoice. Ubah status aktif tanpa menghapus riwayat?' : `Hapus pelanggan ${customer.name}?`)) return
-    await act(() => used ? db.customers.update(customer.id!, { isActive: !customer.isActive, updatedAt: new Date().toISOString() }) : db.customers.delete(customer.id!), used ? 'Status pelanggan diperbarui.' : 'Pelanggan dihapus.')
+    await act(() => used ? saveCloudCustomer({ ...customer, isActive: !customer.isActive, updatedAt: new Date().toISOString() }) : deleteCloudCustomer(customer.id!), used ? 'Status pelanggan diperbarui.' : 'Pelanggan dihapus.')
   }
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget)
     const next = { ...settings, companyName: String(form.get('companyName')).trim() || 'RANCAUPAS BEAUTY', companyAddress: String(form.get('address')), phone: String(form.get('phone')), email: String(form.get('email')), website: String(form.get('website') ?? '').trim(), bankInfo: String(form.get('bankInfo')), invoicePrefix: String(form.get('prefix')).trim().toUpperCase() || 'RB', defaultTax: Number(form.get('tax') || 0), paymentTerms: String(form.get('terms')), updatedAt: new Date().toISOString() }
-    await act(() => db.settings.put(next), 'Pengaturan perusahaan tersimpan.')
+    await act(() => saveCloudSettings(next), 'Pengaturan perusahaan tersimpan.')
   }
-  async function exportInvoice(invoice: Invoice) {
+  async function downloadBackup() {
+    try {
+      const data = await exportCloudBackup()
+      downloadBlob(`rancaupas-backup-${today()}.json`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+      notify('Backup cloud berhasil diunduh.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Backup gagal dibuat.', 'error')
+    }
+  }
+  async function downloadLegacyBackup() {
+    try {
+      await exportLegacyLocalBackup()
+      notify('Salinan data lokal perangkat berhasil diunduh.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Salinan data lokal gagal dibuat.', 'error')
+    }
+  }
+  async function exportInvoice(invoiceSnapshot: Invoice) {
+    let invoice = invoiceSnapshot
+    if (typeof invoiceSnapshot.id === 'string') {
+      try { invoice = await getCloudInvoice(invoiceSnapshot.id) }
+      catch (error) {
+        notify(error instanceof Error ? error.message : 'Invoice terbaru gagal dimuat untuk PDF.', 'error')
+        return
+      }
+    }
     const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')])
     const doc = new jsPDF({ unit: 'mm', format: 'a4' })
     const pageWidth = doc.internal.pageSize.getWidth()
@@ -172,7 +224,7 @@ function AppShell() {
     doc.setTextColor(...ink)
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(16)
-    doc.text(settings.companyName || 'RANCAUPAS BEAUTY', 38, 17)
+    doc.text(settings.companyName || 'RANCAUPAS BEAUTY', pageWidth / 2, 17, { align: 'center' })
     doc.setTextColor(...rose)
     doc.setFontSize(20)
     doc.text(invoice.type === 'sale' ? 'INVOICE' : 'TAGIHAN', pageWidth - margin, 19, { align: 'right' })
@@ -226,7 +278,7 @@ function AppShell() {
     autoTable(doc, {
       startY: tableStartY,
       margin: { left: margin, right: margin, bottom: 15 },
-      head: [['Kode', 'Deskripsi', 'Qty', 'Satuan', 'Harga satuan', 'Diskon', 'Jumlah']],
+      head: [['Kode', 'Produk', 'Qty', 'Satuan', 'Harga satuan', 'Diskon', 'Jumlah']],
       body: invoice.items.map((item) => [item.productCode || '-', item.description, String(item.quantity), item.unit, formatMoney(item.unitPrice), formatMoney(item.discount), formatMoney(Math.round(item.quantity * item.unitPrice) - item.discount)]),
       theme: 'grid',
       styles: { font: 'helvetica', fontSize: 8, cellPadding: 2.5, textColor: ink, lineColor: [232, 225, 223], lineWidth: 0.15, overflow: 'linebreak' },
@@ -255,7 +307,7 @@ function AppShell() {
       ['Subtotal', invoice.subtotal],
       ['Diskon item', itemDiscount],
       ['Diskon tambahan', invoice.discount],
-      ['Pajak', invoice.tax],
+      [`Pajak (${invoice.taxPercent}%)`, invoice.tax],
     ]
     doc.setFontSize(8.5)
     totalRows.forEach(([label, amount], index) => {
@@ -300,8 +352,21 @@ function AppShell() {
       doc.setFontSize(8)
       doc.text(`${settings.companyName}  ·  ${page}/${pageCount}`, margin, pageHeight - 7)
     }
-    doc.save(`${invoice.invoiceNumber.replaceAll('/', '-')}.pdf`)
-    notify(`PDF ${invoice.invoiceNumber} dibuat.`)
+    const filename = `${invoice.invoiceNumber.replaceAll('/', '-')}.pdf`
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const [{ Directory, Filesystem }, { Share }] = await Promise.all([import('@capacitor/filesystem'), import('@capacitor/share')])
+        const base64 = doc.output('datauristring').split(',')[1]
+        const { uri } = await Filesystem.writeFile({ path: filename, data: base64, directory: Directory.Cache })
+        await Share.share({ title: filename, text: `Invoice ${invoice.invoiceNumber}`, url: uri, dialogTitle: 'Simpan atau bagikan invoice' })
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'PDF gagal disimpan di perangkat.', 'error')
+        return
+      }
+    } else {
+      downloadBlob(filename, doc.output('blob'))
+    }
+    notify(`PDF ${invoice.invoiceNumber} siap diunduh atau dibagikan.`)
   }
   async function exportReport(pdf = false) {
     const rows = filteredInvoices.map((invoice) => ({ Nomor: invoice.invoiceNumber, Tanggal: invoice.issueDate, Pihak: invoice.partyName, Jenis: invoice.type === 'sale' ? 'Penjualan' : 'Pembelian', Status: statusText[invoiceStatus(invoice)], Total: invoice.total, Dibayar: invoice.amountPaid, Sisa: invoice.balanceDue }))
@@ -311,34 +376,26 @@ function AppShell() {
     autoTable(doc, { startY: 25, head: [['Nomor', 'Tanggal', 'Pihak', 'Jenis', 'Status', 'Total', 'Dibayar', 'Sisa']], body: rows.map((row) => [row.Nomor, row.Tanggal, row.Pihak, row.Jenis, row.Status, formatMoney(row.Total), formatMoney(row.Dibayar), formatMoney(row.Sisa)]), styles: { fontSize: 8 }, headStyles: { fillColor: [171, 89, 105] } })
     doc.save('rekap-invoice.pdf')
   }
-  async function restoreFile(file?: File) {
-    if (!file || !window.confirm('Restore akan mengganti seluruh data lokal. Lanjutkan?')) return
-    await act(() => restoreBackup(file), 'Backup berhasil dipulihkan.')
-  }
-  async function clearAll() {
-    if (!window.confirm('Hapus seluruh data perusahaan dari browser ini?') || !window.confirm('Konfirmasi kedua: seluruh invoice, pembayaran, dan master data akan dihapus permanen.')) return
-    await act(async () => db.transaction('rw', [db.customers, db.products, db.invoices, db.payments, db.transactions, db.settings], async () => { await Promise.all([db.customers.clear(), db.products.clear(), db.invoices.clear(), db.payments.clear(), db.transactions.clear(), db.settings.clear()]) }), 'Semua data lokal telah dihapus.')
-  }
   const pageTitle = page === 'Dashboard' ? 'Ringkasan bisnis' : page
   const open = (next: Page) => { setPage(next); setMobileNav(false); setSearch('') }
 
   return <div className={`app-shell ${settings.theme === 'dark' ? 'theme-dark' : ''}`}>
     <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
       <div className="brand-lockup"><div className="brand-mark"><img src={logoUrl} alt="Logo RANCAUPAS BEAUTY" /></div><div><strong>RANCAUPAS</strong><span>BEAUTY · BUSINESS DESK</span></div></div>
-      <div className="workspace-label">WORKSPACE <span>LOCAL</span></div>
+      <div className="workspace-label">WORKSPACE <span>CLOUD</span></div>
       <nav className="side-navigation" aria-label="Navigasi utama">{navigation.map((item, index) => { const Icon = item.icon; const previous = navigation[index - 1]; return <div key={item.label}>{item.group !== previous?.group && <p className="nav-group">{item.group}</p>}<button className={`nav-item ${page === item.label ? 'active' : ''}`} onClick={() => open(item.label)}><Icon size={17} strokeWidth={1.8} /><span>{item.label}</span>{item.label === 'Invoice' && invoices.filter((invoice) => invoiceStatus(invoice) === 'overdue').length > 0 && <i>{invoices.filter((invoice) => invoiceStatus(invoice) === 'overdue').length}</i>}</button></div> })}</nav>
-      <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16} /><span>Data tersimpan lokal<br /><b>di perangkat ini</b></span></div><button className="profile-row" onClick={() => open('Pengaturan')}><div className="avatar">RB</div><div><b>{settings.companyName}</b><span>Administrator</span></div><MoreHorizontal size={17} /></button></div>
+      <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16} /><span>Data tersinkron<br /><b>melalui Supabase</b></span></div><button className="profile-row" onClick={() => open('Pengaturan')}><div className="avatar">RB</div><div><b>{settings.companyName}</b><span>Administrator</span></div><MoreHorizontal size={17} /></button></div>
     </aside>
-    <main className="main-area"><header className="topbar"><button className="icon-button mobile-menu" aria-label="Buka navigasi" onClick={() => setMobileNav(!mobileNav)}><Menu size={19} /></button><div className="breadcrumb"><span>RANCAUPAS BEAUTY</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-tools"><div className="today-label"><CalendarDays size={15} /><span>{longDate.format(new Date())}</span></div><span className="top-divider" /><button className="icon-button" aria-label="Ganti tema" title="Ganti tema" onClick={() => void act(() => db.settings.put({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark', updatedAt: new Date().toISOString() }), 'Tema diperbarui.')}>{settings.theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</button><button className="icon-button notification-button" aria-label="Invoice jatuh tempo" title="Invoice jatuh tempo" onClick={() => { setPage('Invoice'); setStatusFilter('overdue') }}><Bell size={17} />{invoices.some((invoice) => invoiceStatus(invoice) === 'overdue') && <i />}</button><div className="top-avatar">RB</div></div></header>
+    <main className="main-area"><header className="topbar"><button className="icon-button mobile-menu" aria-label="Buka navigasi" onClick={() => setMobileNav(!mobileNav)}><Menu size={19} /></button><div className="breadcrumb"><span>RANCAUPAS BEAUTY</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-tools"><div className="today-label"><CalendarDays size={15} /><span>{longDate.format(new Date())}</span></div><span className="top-divider" /><button className="icon-button" aria-label="Ganti tema" title="Ganti tema" onClick={() => void act(() => saveCloudSettings({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark', updatedAt: new Date().toISOString() }), 'Tema diperbarui.')}>{settings.theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</button><button className="icon-button notification-button" aria-label="Invoice jatuh tempo" title="Invoice jatuh tempo" onClick={() => { setPage('Invoice'); setStatusFilter('overdue') }}><Bell size={17} />{invoices.some((invoice) => invoiceStatus(invoice) === 'overdue') && <i />}</button><div className="top-avatar">RB</div></div></header>
       <section className="page-content"><div className="page-heading"><div><div className="eyebrow">{page === 'Dashboard' ? 'RINGKASAN · USAHA' : 'RANCAUPAS BEAUTY · WORKSPACE'}</div><h1>{pageTitle}</h1><p>{page === 'Dashboard' ? 'Pantau performa dan arus kas bisnis Anda.' : pageDescription(page)}</p></div><div className="heading-actions">{page === 'Dashboard' && <select className="period-select" value={range} onChange={(event) => setRange(event.target.value)}><option value="month">Bulan ini</option><option value="year">Tahun ini</option><option value="all">Semua waktu</option></select>}{(page === 'Dashboard' || page === 'Invoice') && <button className="button button-primary" onClick={() => openInvoice()}><Plus size={16} /> Invoice baru</button>}</div></div>
-        {loading ? <div className="loading-state"><span className="spinner" /> Memuat data lokal…</div> : <>
+        {loading ? <div className="loading-state"><span className="spinner" /> Memuat data cloud…</div> : <>
           {page === 'Dashboard' && <Dashboard invoices={invoices} transactions={transactions} customers={customers} monthlyData={monthlyData} turnover={turnover} income={income} expense={expense} receivable={receivable} payable={payable} onOpenInvoice={openInvoice} onViewInvoices={() => open('Invoice')} />}
           {page === 'Invoice' && <InvoicePage invoices={filteredInvoices} query={search} setQuery={setSearch} status={statusFilter} setStatus={setStatusFilter} fromDate={fromDate} setFromDate={setFromDate} toDate={toDate} setToDate={setToDate} onNew={() => openInvoice()} onEdit={openInvoice} onPay={(invoice) => { setPaymentInvoice(invoice); setModal('payment') }} onDelete={removeInvoice} onPdf={exportInvoice} onCsv={() => csvDownload('invoice.csv', invoices.map((item) => ({ Nomor: item.invoiceNumber, Pihak: item.partyName, Tanggal: item.issueDate, JatuhTempo: item.dueDate, Status: statusText[invoiceStatus(item)], Total: item.total, Dibayar: item.amountPaid, Sisa: item.balanceDue })))} />}
           {page === 'Data Pelanggan' && <CustomersPage customers={customers} invoices={invoices} search={search} setSearch={setSearch} onAdd={() => { setEditingCustomer(null); setModal('customer') }} onEdit={(item) => { setEditingCustomer(item); setModal('customer') }} onToggle={toggleCustomer} onExport={() => csvDownload('pelanggan.csv', customers.map((item) => ({ Kode: item.customerCode, Nama: item.name, Perusahaan: item.companyName, Telepon: item.phone, Email: item.email, Alamat: item.address, Status: item.isActive ? 'Aktif' : 'Nonaktif' })))} />}
-          {page === 'Data Produk dan Jasa' && <ProductsPage products={products} search={search} setSearch={setSearch} onAdd={() => { setEditingProduct(null); setModal('product') }} onEdit={(item) => { setEditingProduct(item); setModal('product') }} onExport={() => csvDownload('produk.csv', products.map((item) => ({ Kode: item.productCode, Nama: item.name, Kategori: item.category, Satuan: item.unit, HargaJual: item.sellingPrice, HargaModal: item.costPrice, Status: item.isActive ? 'Aktif' : 'Nonaktif' })))} onToggle={(item) => void act(() => db.products.update(item.id!, { isActive: !item.isActive, updatedAt: new Date().toISOString() }), 'Status produk diperbarui.')} />}
+          {page === 'Data Produk dan Jasa' && <ProductsPage products={products} search={search} setSearch={setSearch} onAdd={() => { setEditingProduct(null); setModal('product') }} onEdit={(item) => { setEditingProduct(item); setModal('product') }} onExport={() => csvDownload('produk.csv', products.map((item) => ({ Kode: item.productCode, Nama: item.name, Kategori: item.category, Satuan: item.unit, HargaJual: item.sellingPrice, HargaModal: item.costPrice, Status: item.isActive ? 'Aktif' : 'Nonaktif' })))} onToggle={(item) => void act(() => setCloudProductActive(item.id!, !item.isActive), 'Status produk diperbarui.')} />}
           {['Transaksi', 'Pemasukan', 'Pengeluaran'].includes(page) && <TransactionsPage page={page} transactions={transactions.filter((item) => page === 'Pemasukan' ? item.type === 'income' : page === 'Pengeluaran' ? item.type === 'expense' : true)} search={search} setSearch={setSearch} onAdd={() => setModal('transaction')} onExport={() => csvDownload('transaksi.csv', transactions.map((item) => ({ Nomor: item.transactionNumber, Tanggal: item.date, Jenis: item.type, Kategori: item.category, Deskripsi: item.description, Nominal: item.amount, Metode: item.paymentMethod, Invoice: item.invoiceId })))} />}
           {(page === 'Rekap Data' || page === 'Laporan') && <ReportsPage invoices={invoices} transactions={transactions} customers={customers} fromDate={fromDate} setFromDate={setFromDate} toDate={toDate} setToDate={setToDate} onCsv={() => exportReport(false)} onPdf={() => exportReport(true)} />}
-          {page === 'Pengaturan' && <SettingsPage settings={settings} onSave={saveSettings} onBackup={() => void exportBackup().then(() => notify('Backup berhasil diunduh.')).catch(() => notify('Backup gagal dibuat.', 'error'))} onRestore={restoreFile} onClear={() => void clearAll()} />}
+          {page === 'Pengaturan' && <SettingsPage settings={settings} onSave={saveSettings} onBackup={() => void downloadBackup()} onLegacyBackup={() => void downloadLegacyBackup()} onSignOut={onSignOut} />}
         </>}
       </section></main>
     {mobileNav && <button className="nav-scrim" aria-label="Tutup navigasi" onClick={() => setMobileNav(false)} />}
@@ -399,7 +456,7 @@ function ReportsPage({ invoices, transactions, customers, fromDate, setFromDate,
   return <><div className="report-filters panel"><div className="report-filter-copy"><h2>Periode laporan</h2><p>Invoice berdasarkan tanggal terbit, transaksi berdasarkan tanggal pencatatan.</p></div><div className="toolbar"><DateFilter label="Dari" value={fromDate} onChange={setFromDate} /><DateFilter label="Sampai" value={toDate} onChange={setToDate} /><button className="button button-quiet" onClick={onCsv}><Download size={15} /> CSV</button><button className="button button-secondary" onClick={onPdf}><FileDown size={15} /> PDF</button></div></div><div className="report-metrics">{metrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}</div><section className="panel data-panel report-table"><div className="panel-heading"><div><h2>Ringkasan per pelanggan</h2><p>Nilai penjualan dan piutang berdasarkan invoice terpilih.</p></div><span className="count-pill">{customers.length}</span></div><div className="table-scroll"><table><thead><tr><th>Pelanggan</th><th>Invoice</th><th className="align-right">Nilai invoice</th><th className="align-right">Dibayar</th><th className="align-right">Piutang</th></tr></thead><tbody>{customers.map((customer) => { const related = sales.filter((item) => item.customerId === customer.id); if (!related.length) return null; return <tr key={customer.id}><td>{customer.name}</td><td>{related.length}</td><td className="align-right">{formatMoney(related.reduce((sum, item) => sum + item.total, 0))}</td><td className="align-right">{formatMoney(related.reduce((sum, item) => sum + item.amountPaid, 0))}</td><td className="align-right strong-cell">{formatMoney(related.reduce((sum, item) => sum + item.balanceDue, 0))}</td></tr> })}</tbody></table></div></section></>
 }
 
-function SettingsPage({ settings, onSave, onBackup, onRestore, onClear }: { settings: CompanySettings; onSave: (event: FormEvent<HTMLFormElement>) => void; onBackup: () => void; onRestore: (file?: File) => void; onClear: () => void }) {
+function SettingsPage({ settings, onSave, onBackup, onLegacyBackup, onSignOut }: { settings: CompanySettings; onSave: (event: FormEvent<HTMLFormElement>) => void; onBackup: () => void; onLegacyBackup: () => void; onSignOut: () => void }) {
   return <div className="settings-layout">
     <form className="panel settings-panel" onSubmit={onSave}>
       <div className="panel-heading"><div><h2>Profil perusahaan</h2><p>Informasi ini digunakan pada dokumen invoice.</p></div><Settings2 size={18} className="subtle-icon" /></div>
@@ -417,11 +474,11 @@ function SettingsPage({ settings, onSave, onBackup, onRestore, onClear }: { sett
       <div className="panel-footer"><span>Nomor invoice berikutnya: {settings.invoicePrefix}/{new Date().getFullYear()}/{String(settings.invoiceCounter).padStart(4, '0')}</span><button className="button button-primary" type="submit"><Check size={15} /> Simpan pengaturan</button></div>
     </form>
     <section className="panel backup-panel">
-      <div className="panel-heading"><div><h2>Data lokal & backup</h2><p>Data tersimpan di profil browser ini.</p></div><ShieldCheck size={18} className="subtle-icon" /></div>
-      <div className="backup-notice"><ShieldCheck size={17} /><span>Data tidak dikirim ke server. Simpan backup berkala di lokasi yang aman.</span></div>
-      <button className="backup-action" onClick={onBackup}><span><Download size={17} /></span><div><b>Unduh backup</b><small>Ekspor seluruh data ke satu file JSON.</small></div><ArrowDownRight size={16} /></button>
-      <label className="backup-action upload-backup"><span><FileDown size={17} /></span><div><b>Pulihkan backup</b><small>Impor file backup JSON tersimpan.</small></div><input type="file" accept="application/json,.json" onChange={(event) => { onRestore(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} /><ArrowDownRight size={16} /></label>
-      <div className="danger-zone"><div><b>Hapus seluruh data lokal</b><small>Tindakan ini tidak dapat dibatalkan.</small></div><button className="button button-danger" onClick={onClear}><Trash2 size={15} /> Hapus data</button></div>
+      <div className="panel-heading"><div><h2>Workspace cloud</h2><p>Web dan Android menggunakan perusahaan yang sama.</p></div><ShieldCheck size={18} className="subtle-icon" /></div>
+      <div className="backup-notice"><ShieldCheck size={17} /><span>Perubahan tersimpan ke Supabase saat Anda menyimpannya. Ekspor backup secara berkala.</span></div>
+      <button className="backup-action" onClick={onBackup}><span><Download size={17} /></span><div><b>Unduh backup cloud</b><small>Ekspor data workspace Supabase ke file JSON.</small></div><ArrowDownRight size={16} /></button>
+      <button className="backup-action" onClick={onLegacyBackup}><span><FileDown size={17} /></span><div><b>Unduh backup lokal perangkat ini</b><small>Salin data IndexedDB lama; tidak mengimpor data ke cloud.</small></div><ArrowDownRight size={16} /></button>
+      <div className="danger-zone"><div><b>Akun Supabase</b><small>Keluar dari workspace di perangkat ini.</small></div><button className="button button-quiet" onClick={onSignOut}>Keluar</button></div>
     </section>
   </div>
 }
@@ -429,10 +486,11 @@ function SettingsPage({ settings, onSave, onBackup, onRestore, onClear }: { sett
 function InvoiceModal({ invoice, customers, defaultTax, onClose, onSubmit }: { invoice: Invoice | null; customers: Customer[]; defaultTax: number; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>, items: InvoiceItem[]) => void }) {
   const [items, setItems] = useState<InvoiceItem[]>(invoice?.items ?? [{ productCode: '', description: '', quantity: 1, unit: 'pcs', unitPrice: 0, discount: 0 }])
   const [discount, setDiscount] = useState(invoice?.discount ?? 0)
-  const [taxPercent, setTaxPercent] = useState(invoice ? invoice.tax / Math.max(invoice.total - invoice.tax, 1) * 100 : defaultTax)
-  const calculated = totals(items, discount, taxPercent)
+  const initialTaxPercent = invoice ? invoice.taxPercent : defaultTax
+  const [taxPercent, setTaxPercent] = useState(() => initialTaxPercent === 0 ? '' : String(Number(initialTaxPercent.toFixed(1))))
+  const calculated = totals(items, discount, Number(taxPercent) || 0)
   function changeItem(index: number, patch: Partial<InvoiceItem>) { setItems((old) => old.map((item, current) => current === index ? { ...item, ...patch } : item)) }
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="modal invoice-modal" onSubmit={(event) => onSubmit(event, items)}><div className="modal-header"><div><span className="eyebrow">DOKUMEN BARU</span><h2>{invoice ? `Edit ${invoice.invoiceNumber}` : 'Buat invoice'}</h2></div><button type="button" className="icon-button" aria-label="Tutup" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="form-grid"><label className="field"><span>Jenis dokumen</span><select name="type" defaultValue={invoice?.type ?? 'sale'} disabled={!!invoice}><option value="sale">Invoice penjualan</option><option value="purchase">Tagihan pemasok</option></select></label><label className="field"><span>Pilih pelanggan / pemasok</span><select name="customerId" defaultValue={invoice?.customerId ?? ''}><option value="">Isi nama manual</option>{customers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Nama pelanggan / pemasok *" name="partyName" defaultValue={invoice?.partyName} required /><Field label="Telepon" name="partyPhone" defaultValue={invoice?.partyPhone} /><Field label="Alamat" name="partyAddress" defaultValue={invoice?.partyAddress} wide /><Field label="Tanggal invoice" name="issueDate" type="date" defaultValue={invoice?.issueDate ?? today()} required /><Field label="Jatuh tempo" name="dueDate" type="date" defaultValue={invoice?.dueDate ?? today()} required /></div><div className="item-editor-heading"><div><h3>Rincian item</h3><p>Isi detail item secara manual.</p></div><button type="button" className="button button-quiet" onClick={() => setItems([...items, { productCode: '', description: '', quantity: 1, unit: 'pcs', unitPrice: 0, discount: 0 }])}><Plus size={14} /> Tambah baris</button></div><div className="invoice-item-list">{items.map((item, index) => <div className="invoice-item-row" key={index}><div className="item-description"><Field label="Kode item" name={`code-${index}`} value={item.productCode} onChange={(event) => changeItem(index, { productCode: event.target.value })} /><Field label="Deskripsi" name={`description-${index}`} value={item.description} onChange={(event) => changeItem(index, { description: event.target.value })} required /></div><Field label="Qty" name={`qty-${index}`} type="number" min="0.01" step="0.01" value={item.quantity} onChange={(event: React.ChangeEvent<HTMLInputElement>) => changeItem(index, { quantity: Number(event.target.value) })} required /><Field label="Satuan" name={`unit-${index}`} value={item.unit} onChange={(event: React.ChangeEvent<HTMLInputElement>) => changeItem(index, { unit: event.target.value })} /><MoneyField label="Harga (Rp)" name={`price-${index}`} value={item.unitPrice} onChange={(value) => changeItem(index, { unitPrice: value })} required /><MoneyField label="Diskon (Rp)" name={`discount-${index}`} value={item.discount} onChange={(value) => changeItem(index, { discount: value })} /><button type="button" className="icon-button remove-item" aria-label="Hapus item" disabled={items.length === 1} onClick={() => setItems(items.filter((_, current) => current !== index))}><Trash2 size={15} /></button></div>)}</div><div className="form-grid invoice-extras"><MoneyField label="Diskon keseluruhan (Rp)" name="discount" value={discount} onChange={setDiscount} /><Field label={`Pajak (%) · default ${defaultTax}%`} name="tax" type="number" min="0" max="100" step="0.1" value={taxPercent} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setTaxPercent(Number(event.target.value))} /><Field label="Catatan / syarat pembayaran" name="notes" defaultValue={invoice?.notes} wide /></div><div className="invoice-totals"><span>Subtotal <b>{formatMoney(calculated.subtotal)}</b></span><span>Diskon item <b>{formatMoney(items.reduce((sum, item) => sum + item.discount, 0))}</b></span><span>Pajak <b>{formatMoney(calculated.tax)}</b></span><strong>Total <b>{formatMoney(calculated.total)}</b></strong>{invoice && <small>Pembayaran tercatat {formatMoney(invoice.amountPaid)} · sisa {formatMoney(Math.max(0, calculated.total - invoice.amountPaid))}</small>}</div></div><div className="modal-footer"><button type="button" className="button button-quiet" onClick={onClose}>Batal</button><button className="button button-primary" type="submit"><Check size={15} /> {invoice ? 'Simpan perubahan' : 'Simpan invoice'}</button></div></form></div>
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="modal invoice-modal" onSubmit={(event) => onSubmit(event, items)}><div className="modal-header"><div><span className="eyebrow">DOKUMEN BARU</span><h2>{invoice ? `Edit ${invoice.invoiceNumber}` : 'Buat invoice'}</h2></div><button type="button" className="icon-button" aria-label="Tutup" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="form-grid"><label className="field"><span>Jenis dokumen</span><select name="type" defaultValue={invoice?.type ?? 'sale'} disabled={!!invoice}><option value="sale">Invoice penjualan</option><option value="purchase">Tagihan pemasok</option></select></label><label className="field"><span>Pilih pelanggan / pemasok</span><select name="customerId" defaultValue={invoice?.customerId ?? ''}><option value="">Isi nama manual</option>{customers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><Field label="Nama pelanggan / pemasok *" name="partyName" defaultValue={invoice?.partyName} required /><Field label="Telepon" name="partyPhone" defaultValue={invoice?.partyPhone} /><Field label="Alamat" name="partyAddress" defaultValue={invoice?.partyAddress} wide /><Field label="Tanggal invoice" name="issueDate" type="date" defaultValue={invoice?.issueDate ?? today()} required /><Field label="Jatuh tempo" name="dueDate" type="date" defaultValue={invoice?.dueDate ?? today()} required /></div><div className="item-editor-heading"><div><h3>Rincian item</h3><p>Isi detail produk secara manual.</p></div><button type="button" className="button button-quiet" onClick={() => setItems([...items, { productCode: '', description: '', quantity: 1, unit: 'pcs', unitPrice: 0, discount: 0 }])}><Plus size={14} /> Tambah baris</button></div><div className="invoice-item-list">{items.map((item, index) => <div className="invoice-item-row" key={index}><Field label="Produk" name={`description-${index}`} value={item.description} onChange={(event) => changeItem(index, { description: event.target.value })} required /><Field label="Qty" name={`qty-${index}`} type="number" min="0.01" step="0.01" value={item.quantity} onChange={(event: React.ChangeEvent<HTMLInputElement>) => changeItem(index, { quantity: Number(event.target.value) })} required /><Field label="Satuan" name={`unit-${index}`} value={item.unit} onChange={(event: React.ChangeEvent<HTMLInputElement>) => changeItem(index, { unit: event.target.value })} /><MoneyField label="Harga (Rp)" name={`price-${index}`} value={item.unitPrice} onChange={(value) => changeItem(index, { unitPrice: value })} required /><button type="button" className="icon-button remove-item" aria-label="Hapus item" disabled={items.length === 1} onClick={() => setItems(items.filter((_, current) => current !== index))}><Trash2 size={15} /></button></div>)}</div><div className="form-grid invoice-extras"><MoneyField label="Diskon keseluruhan (Rp)" name="discount" value={discount} onChange={setDiscount} /><label className="field"><span>Pajak (%) · default {defaultTax}%</span><input name="tax" type="text" inputMode="decimal" value={taxPercent} onChange={(event) => { const raw = event.target.value.replace(',', '.').replace(/[^\d.]/g, ''); const [whole = '', ...fraction] = raw.split('.'); const integer = whole.replace(/^0+(?=\d)/, ''); setTaxPercent(`${integer}${fraction.length ? `.${fraction.join('').slice(0, 1)}` : ''}`) }} /></label></div><div className="invoice-totals"><span>Subtotal <b>{formatMoney(calculated.subtotal)}</b></span><span>Diskon item <b>{formatMoney(items.reduce((sum, item) => sum + item.discount, 0))}</b></span><span>Pajak <b>{formatMoney(calculated.tax)}</b></span><strong>Total <b>{formatMoney(calculated.total)}</b></strong>{invoice && <small>Pembayaran tercatat {formatMoney(invoice.amountPaid)} · sisa {formatMoney(Math.max(0, calculated.total - invoice.amountPaid))}</small>}</div></div><div className="modal-footer"><button type="button" className="button button-quiet" onClick={onClose}>Batal</button><button className="button button-primary" type="submit"><Check size={15} /> {invoice ? 'Simpan perubahan' : 'Simpan invoice'}</button></div></form></div>
 }
 
 function FormModal({ title, onClose, onSubmit, children }: { title: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; children: ReactNode }) {

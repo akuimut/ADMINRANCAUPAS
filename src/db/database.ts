@@ -5,7 +5,7 @@ export type InvoiceStatus = 'draft' | 'unpaid' | 'partial' | 'paid' | 'overdue' 
 export type TransactionType = 'income' | 'expense'
 
 export interface Customer {
-  id?: number
+  id?: number | string
   customerCode: string
   name: string
   companyName: string
@@ -19,7 +19,7 @@ export interface Customer {
 }
 
 export interface Product {
-  id?: number
+  id?: number | string
   productCode: string
   name: string
   category: string
@@ -34,7 +34,7 @@ export interface Product {
 }
 
 export interface InvoiceItem {
-  productId?: number
+  productId?: number | string
   productCode: string
   description: string
   quantity: number
@@ -44,10 +44,10 @@ export interface InvoiceItem {
 }
 
 export interface Invoice {
-  id?: number
+  id?: number | string
   invoiceNumber: string
   type: InvoiceType
-  customerId?: number
+  customerId?: number | string
   partyName: string
   partyAddress: string
   partyPhone: string
@@ -57,6 +57,7 @@ export interface Invoice {
   subtotal: number
   discount: number
   tax: number
+  taxPercent: number
   total: number
   amountPaid: number
   balanceDue: number
@@ -67,8 +68,8 @@ export interface Invoice {
 }
 
 export interface Payment {
-  id?: number
-  invoiceId: number
+  id?: number | string
+  invoiceId: number | string
   paymentDate: string
   amount: number
   method: string
@@ -78,7 +79,7 @@ export interface Payment {
 }
 
 export interface Transaction {
-  id?: number
+  id?: number | string
   transactionNumber: string
   date: string
   type: TransactionType
@@ -86,7 +87,7 @@ export interface Transaction {
   description: string
   amount: number
   paymentMethod: string
-  invoiceId?: number
+  invoiceId?: number | string
   notes: string
   createdAt: string
 }
