@@ -3,7 +3,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 
 // https://vite.dev/config/
-export default defineConfig({
-  base: '/ADMINRANCAUPAS/',
+export default defineConfig(({ mode }) => ({
+  base: mode === 'android' ? './' : '/ADMINRANCAUPAS/',
   plugins: [react(), tailwindcss()],
-})
+}))

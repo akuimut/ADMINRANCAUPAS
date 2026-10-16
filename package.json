@@ -6,10 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:android": "tsc -b && vite build --mode android && cap sync android",
+    "android:open": "cap open android",
+    "android:run": "cap run android",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
     "@tailwindcss/vite": "^4.3.3",
     "dexie": "^4.4.6",
     "jspdf": "^4.2.1",
@@ -21,6 +26,7 @@
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
