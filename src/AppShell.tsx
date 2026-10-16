@@ -43,7 +43,7 @@ function AppShell() {
   async function refresh() {
     const [customerRows, productRows, invoiceRows, transactionRows, company] = await Promise.all([db.customers.toArray(), db.products.toArray(), db.invoices.toArray(), db.transactions.toArray(), db.settings.get('company')])
     setCustomers(customerRows); setProducts(productRows); setInvoices(invoiceRows.sort((a, b) => b.issueDate.localeCompare(a.issueDate)))
-    setTransactions(transactionRows.sort((a, b) => b.date.localeCompare(a.date))); setSettings(company ?? defaultSettings)
+    setTransactions(transactionRows.sort((a, b) => b.date.localeCompare(a.date))); setSettings({ ...defaultSettings, ...company })
   }
   useEffect(() => {
     let active = true
@@ -52,7 +52,7 @@ function AppShell() {
         const [customerRows, productRows, invoiceRows, transactionRows, company] = await Promise.all([db.customers.toArray(), db.products.toArray(), db.invoices.toArray(), db.transactions.toArray(), db.settings.get('company')])
         if (!active) return
         setCustomers(customerRows); setProducts(productRows); setInvoices(invoiceRows.sort((a, b) => b.issueDate.localeCompare(a.issueDate)))
-        setTransactions(transactionRows.sort((a, b) => b.date.localeCompare(a.date))); setSettings(company ?? defaultSettings)
+        setTransactions(transactionRows.sort((a, b) => b.date.localeCompare(a.date))); setSettings({ ...defaultSettings, ...company })
       } catch { if (active) setToast({ message: 'Database lokal tidak dapat dibuka.', kind: 'error' }) }
       finally { if (active) setLoading(false) }
     }
@@ -152,25 +152,154 @@ function AppShell() {
   }
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget)
-    const next = { ...settings, companyName: String(form.get('companyName')).trim() || 'RANCAUPAS BEAUTY', companyAddress: String(form.get('address')), phone: String(form.get('phone')), email: String(form.get('email')), bankInfo: String(form.get('bankInfo')), invoicePrefix: String(form.get('prefix')).trim().toUpperCase() || 'RB', defaultTax: Number(form.get('tax') || 0), paymentTerms: String(form.get('terms')), updatedAt: new Date().toISOString() }
+    const next = { ...settings, companyName: String(form.get('companyName')).trim() || 'RANCAUPAS BEAUTY', companyAddress: String(form.get('address')), phone: String(form.get('phone')), email: String(form.get('email')), website: String(form.get('website') ?? '').trim(), bankInfo: String(form.get('bankInfo')), invoicePrefix: String(form.get('prefix')).trim().toUpperCase() || 'RB', defaultTax: Number(form.get('tax') || 0), paymentTerms: String(form.get('terms')), updatedAt: new Date().toISOString() }
     await act(() => db.settings.put(next), 'Pengaturan perusahaan tersimpan.')
   }
   async function exportInvoice(invoice: Invoice) {
     const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')])
-    const doc = new jsPDF()
-    const logo = new Image(); logo.src = logoUrl; await logo.decode(); doc.addImage(logo, 'PNG', 14, 8, 20, 20)
-    doc.setTextColor(158, 72, 91); doc.setFontSize(17); doc.text(settings.companyName || 'RANCAUPAS BEAUTY', 39, 17)
-    doc.setTextColor(45, 40, 40); doc.setFontSize(10); doc.text([settings.companyAddress, settings.phone, settings.email].filter(Boolean).join(' | ') || 'Informasi perusahaan belum diatur', 39, 24)
-    doc.setFontSize(16); doc.text(invoice.type === 'sale' ? 'INVOICE' : 'TAGIHAN PEMBELIAN', 14, 42); doc.setFontSize(10)
-    doc.text(`Nomor: ${invoice.invoiceNumber}`, 14, 50); doc.text(`Tanggal: ${formatDate(invoice.issueDate)}    Jatuh tempo: ${formatDate(invoice.dueDate)}`, 14, 56)
-    doc.text(`${invoice.type === 'sale' ? 'Pelanggan' : 'Pemasok'}: ${invoice.partyName}`, 14, 66); doc.text(invoice.partyAddress || '-', 14, 72)
-    autoTable(doc, { startY: 80, head: [['Deskripsi', 'Qty', 'Satuan', 'Harga', 'Jumlah']], body: invoice.items.map((item) => [item.description, String(item.quantity), item.unit, formatMoney(item.unitPrice), formatMoney(item.quantity * item.unitPrice - item.discount)]), headStyles: { fillColor: [171, 89, 105] } })
-    const finalY = (doc as JsPdf & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? 100
-    doc.text(`Subtotal: ${formatMoney(invoice.subtotal)}`, 140, finalY + 10); doc.text(`Diskon: ${formatMoney(invoice.discount)}`, 140, finalY + 16); doc.text(`Pajak: ${formatMoney(invoice.tax)}`, 140, finalY + 22)
-    doc.setFontSize(12); doc.text(`Total: ${formatMoney(invoice.total)}`, 140, finalY + 30); doc.setFontSize(10)
-    doc.text(`Dibayar: ${formatMoney(invoice.amountPaid)}    Sisa: ${formatMoney(invoice.balanceDue)}`, 14, finalY + 40)
-    if (invoice.notes) doc.text(`Catatan: ${invoice.notes}`, 14, finalY + 50, { maxWidth: 180 })
-    if (settings.bankInfo) doc.text(`Pembayaran: ${settings.bankInfo}`, 14, finalY + 60, { maxWidth: 180 })
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' })
+    const pageWidth = doc.internal.pageSize.getWidth()
+    const pageHeight = doc.internal.pageSize.getHeight()
+    const margin = 14
+    const rose: [number, number, number] = [158, 72, 91]
+    const ink: [number, number, number] = [45, 40, 40]
+    const muted: [number, number, number] = [112, 104, 102]
+    const logo = new Image()
+    logo.src = logoUrl
+    await logo.decode()
+    doc.addImage(logo, 'PNG', margin, 10, 19, 19)
+
+    doc.setTextColor(...ink)
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(16)
+    doc.text(settings.companyName || 'RANCAUPAS BEAUTY', 38, 17)
+    doc.setTextColor(...rose)
+    doc.setFontSize(20)
+    doc.text(invoice.type === 'sale' ? 'INVOICE' : 'TAGIHAN', pageWidth - margin, 19, { align: 'right' })
+    doc.setDrawColor(225, 215, 214)
+    doc.setLineWidth(0.4)
+    doc.line(margin, 34, pageWidth - margin, 34)
+
+    const companyDetails = [settings.companyAddress, settings.phone && `Telp. ${settings.phone}`, settings.email && `Email: ${settings.email}`, settings.website && `Web: ${settings.website}`].filter(Boolean) as string[]
+    let detailY = 42
+    doc.setTextColor(...muted)
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(8.5)
+    for (const detail of companyDetails) {
+      const lines = doc.splitTextToSize(detail, 91)
+      doc.text(lines, margin, detailY)
+      detailY += lines.length * 4.2
+    }
+
+    const metadata = [
+      ['Nomor invoice', invoice.invoiceNumber],
+      ['Tanggal invoice', formatDate(invoice.issueDate)],
+      ['Jatuh tempo', formatDate(invoice.dueDate)],
+      ['Status', statusText[invoiceStatus(invoice)]],
+    ]
+    let metaY = 43
+    for (const [label, value] of metadata) {
+      doc.setTextColor(...muted)
+      doc.setFont('helvetica', 'normal')
+      doc.text(label, 121, metaY)
+      doc.setTextColor(...ink)
+      doc.setFont('helvetica', 'bold')
+      doc.text(value, pageWidth - margin, metaY, { align: 'right' })
+      metaY += 6
+    }
+
+    const partyY = Math.max(detailY, metaY) + 7
+    doc.setTextColor(...rose)
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(8)
+    doc.text(invoice.type === 'sale' ? 'DITAGIHKAN KEPADA' : 'PEMASOK', margin, partyY)
+    doc.setTextColor(...ink)
+    doc.setFontSize(11)
+    doc.text(invoice.partyName, margin, partyY + 6)
+    doc.setTextColor(...muted)
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(8.5)
+    const partyLines = [invoice.partyAddress, invoice.partyPhone && `Telp. ${invoice.partyPhone}`].filter(Boolean).flatMap((line) => doc.splitTextToSize(line, 100))
+    if (partyLines.length) doc.text(partyLines, margin, partyY + 12)
+    const tableStartY = partyY + 15 + Math.max(0, partyLines.length - 1) * 4
+
+    autoTable(doc, {
+      startY: tableStartY,
+      margin: { left: margin, right: margin, bottom: 15 },
+      head: [['Kode', 'Deskripsi', 'Qty', 'Satuan', 'Harga satuan', 'Diskon', 'Jumlah']],
+      body: invoice.items.map((item) => [item.productCode || '-', item.description, String(item.quantity), item.unit, formatMoney(item.unitPrice), formatMoney(item.discount), formatMoney(Math.round(item.quantity * item.unitPrice) - item.discount)]),
+      theme: 'grid',
+      styles: { font: 'helvetica', fontSize: 8, cellPadding: 2.5, textColor: ink, lineColor: [232, 225, 223], lineWidth: 0.15, overflow: 'linebreak' },
+      headStyles: { fillColor: rose, textColor: [255, 255, 255], fontStyle: 'bold', halign: 'left' },
+      alternateRowStyles: { fillColor: [250, 247, 246] },
+      columnStyles: { 0: { cellWidth: 18 }, 1: { cellWidth: 47 }, 2: { cellWidth: 12, halign: 'right' }, 3: { cellWidth: 15 }, 4: { cellWidth: 29, halign: 'right' }, 5: { cellWidth: 25, halign: 'right' }, 6: { cellWidth: 36, halign: 'right' } },
+      didDrawPage: ({ pageNumber }) => {
+        doc.setTextColor(...muted)
+        doc.setFontSize(8)
+        doc.text(`${invoice.invoiceNumber}  ·  ${pageNumber}`, pageWidth - margin, pageHeight - 7, { align: 'right' })
+      },
+    })
+
+    let finalY = (doc as JsPdf & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? tableStartY
+    if (finalY + 66 > pageHeight - 12) {
+      doc.addPage()
+      finalY = 20
+    }
+    const summaryY = finalY + 10
+    const summaryX = pageWidth - margin - 75
+    const summaryWidth = 75
+    doc.setFillColor(250, 247, 246)
+    doc.roundedRect(summaryX, summaryY, summaryWidth, 58, 2, 2, 'F')
+    const itemDiscount = invoice.items.reduce((sum, item) => sum + item.discount, 0)
+    const totalRows = [
+      ['Subtotal', invoice.subtotal],
+      ['Diskon item', itemDiscount],
+      ['Diskon tambahan', invoice.discount],
+      ['Pajak', invoice.tax],
+    ]
+    doc.setFontSize(8.5)
+    totalRows.forEach(([label, amount], index) => {
+      const y = summaryY + 7 + index * 7
+      doc.setTextColor(...muted)
+      doc.setFont('helvetica', 'normal')
+      doc.text(String(label), summaryX + 5, y)
+      doc.setTextColor(...ink)
+      doc.text(formatMoney(Number(amount)), summaryX + summaryWidth - 5, y, { align: 'right' })
+    })
+    doc.setDrawColor(220, 207, 207)
+    doc.line(summaryX + 5, summaryY + 36, summaryX + summaryWidth - 5, summaryY + 36)
+    doc.setTextColor(...ink)
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(10)
+    doc.text('TOTAL', summaryX + 5, summaryY + 43)
+    doc.setTextColor(...rose)
+    doc.setFontSize(11)
+    doc.text(formatMoney(invoice.total), summaryX + summaryWidth - 5, summaryY + 43, { align: 'right' })
+    doc.setTextColor(...muted)
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(8)
+    doc.text(`Dibayar ${formatMoney(invoice.amountPaid)}`, summaryX + 5, summaryY + 51)
+    doc.setTextColor(...ink)
+    doc.setFont('helvetica', 'bold')
+    doc.text(`Sisa ${formatMoney(invoice.balanceDue)}`, summaryX + summaryWidth - 5, summaryY + 51, { align: 'right' })
+
+    let notesY = summaryY + 5
+    const notes = [invoice.notes && `Catatan: ${invoice.notes}`, settings.bankInfo && `Pembayaran: ${settings.bankInfo}`, settings.paymentTerms && `Syarat: ${settings.paymentTerms}`].filter(Boolean) as string[]
+    for (const note of notes) {
+      doc.setTextColor(...muted)
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(8)
+      const lines = doc.splitTextToSize(note, 100)
+      doc.text(lines, margin, notesY)
+      notesY += lines.length * 4 + 4
+    }
+    const pageCount = doc.getNumberOfPages()
+    for (let page = 1; page <= pageCount; page += 1) {
+      doc.setPage(page)
+      doc.setTextColor(...muted)
+      doc.setFontSize(8)
+      doc.text(`${settings.companyName}  ·  ${page}/${pageCount}`, margin, pageHeight - 7)
+    }
     doc.save(`${invoice.invoiceNumber.replaceAll('/', '-')}.pdf`)
     notify(`PDF ${invoice.invoiceNumber} dibuat.`)
   }
@@ -271,7 +400,30 @@ function ReportsPage({ invoices, transactions, customers, fromDate, setFromDate,
 }
 
 function SettingsPage({ settings, onSave, onBackup, onRestore, onClear }: { settings: CompanySettings; onSave: (event: FormEvent<HTMLFormElement>) => void; onBackup: () => void; onRestore: (file?: File) => void; onClear: () => void }) {
-  return <div className="settings-layout"><form className="panel settings-panel" onSubmit={onSave}><div className="panel-heading"><div><h2>Profil perusahaan</h2><p>Informasi ini digunakan pada dokumen invoice.</p></div><Settings2 size={18} className="subtle-icon" /></div><div className="settings-form"><Field label="Nama perusahaan" name="companyName" defaultValue={settings.companyName} /><Field label="Awalan nomor dokumen" name="prefix" defaultValue={settings.invoicePrefix} maxLength={8} /><Field label="Nomor telepon" name="phone" defaultValue={settings.phone} /><Field label="Email" name="email" type="email" defaultValue={settings.email} /><Field label="Pajak default (%)" name="tax" type="number" min="0" max="100" step="0.1" defaultValue={settings.defaultTax} /><Field label="Alamat perusahaan" name="address" defaultValue={settings.companyAddress} wide /><Field label="Rekening pembayaran" name="bankInfo" defaultValue={settings.bankInfo} wide /><Field label="Syarat pembayaran default" name="terms" defaultValue={settings.paymentTerms} wide /></div><div className="panel-footer"><span>Nomor invoice berikutnya: {settings.invoicePrefix}/{new Date().getFullYear()}/{String(settings.invoiceCounter).padStart(4, '0')}</span><button className="button button-primary" type="submit"><Check size={15} /> Simpan pengaturan</button></div></form><section className="panel backup-panel"><div className="panel-heading"><div><h2>Data lokal & backup</h2><p>Data tersimpan di profil browser ini.</p></div><ShieldCheck size={18} className="subtle-icon" /></div><div className="backup-notice"><ShieldCheck size={17} /><span>Data tidak dikirim ke server. Simpan backup berkala di lokasi yang aman.</span></div><button className="backup-action" onClick={onBackup}><span><Download size={17} /></span><div><b>Unduh backup</b><small>Ekspor seluruh data ke satu file JSON.</small></div><ArrowDownRight size={16} /></button><label className="backup-action upload-backup"><span><FileDown size={17} /></span><div><b>Pulihkan backup</b><small>Impor file backup JSON tersimpan.</small></div><input type="file" accept="application/json,.json" onChange={(event) => { onRestore(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} /><ArrowDownRight size={16} /></label><div className="danger-zone"><div><b>Hapus seluruh data lokal</b><small>Tindakan ini tidak dapat dibatalkan.</small></div><button className="button button-danger" onClick={onClear}><Trash2 size={15} /> Hapus data</button></div></section></div>
+  return <div className="settings-layout">
+    <form className="panel settings-panel" onSubmit={onSave}>
+      <div className="panel-heading"><div><h2>Profil perusahaan</h2><p>Informasi ini digunakan pada dokumen invoice.</p></div><Settings2 size={18} className="subtle-icon" /></div>
+      <div className="settings-form">
+        <Field label="Nama perusahaan" name="companyName" defaultValue={settings.companyName} />
+        <Field label="Awalan nomor dokumen" name="prefix" defaultValue={settings.invoicePrefix} maxLength={8} />
+        <Field label="Nomor telepon" name="phone" defaultValue={settings.phone} />
+        <Field label="Email" name="email" type="email" defaultValue={settings.email} />
+        <Field label="Website" name="website" type="url" placeholder="https://contoh.co.id" defaultValue={settings.website} />
+        <Field label="Pajak default (%)" name="tax" type="number" min="0" max="100" step="0.1" defaultValue={settings.defaultTax} />
+        <Field label="Alamat perusahaan" name="address" defaultValue={settings.companyAddress} wide />
+        <Field label="Rekening pembayaran" name="bankInfo" defaultValue={settings.bankInfo} wide />
+        <Field label="Syarat pembayaran default" name="terms" defaultValue={settings.paymentTerms} wide />
+      </div>
+      <div className="panel-footer"><span>Nomor invoice berikutnya: {settings.invoicePrefix}/{new Date().getFullYear()}/{String(settings.invoiceCounter).padStart(4, '0')}</span><button className="button button-primary" type="submit"><Check size={15} /> Simpan pengaturan</button></div>
+    </form>
+    <section className="panel backup-panel">
+      <div className="panel-heading"><div><h2>Data lokal & backup</h2><p>Data tersimpan di profil browser ini.</p></div><ShieldCheck size={18} className="subtle-icon" /></div>
+      <div className="backup-notice"><ShieldCheck size={17} /><span>Data tidak dikirim ke server. Simpan backup berkala di lokasi yang aman.</span></div>
+      <button className="backup-action" onClick={onBackup}><span><Download size={17} /></span><div><b>Unduh backup</b><small>Ekspor seluruh data ke satu file JSON.</small></div><ArrowDownRight size={16} /></button>
+      <label className="backup-action upload-backup"><span><FileDown size={17} /></span><div><b>Pulihkan backup</b><small>Impor file backup JSON tersimpan.</small></div><input type="file" accept="application/json,.json" onChange={(event) => { onRestore(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} /><ArrowDownRight size={16} /></label>
+      <div className="danger-zone"><div><b>Hapus seluruh data lokal</b><small>Tindakan ini tidak dapat dibatalkan.</small></div><button className="button button-danger" onClick={onClear}><Trash2 size={15} /> Hapus data</button></div>
+    </section>
+  </div>
 }
 
 function InvoiceModal({ invoice, customers, defaultTax, onClose, onSubmit }: { invoice: Invoice | null; customers: Customer[]; defaultTax: number; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>, items: InvoiceItem[]) => void }) {

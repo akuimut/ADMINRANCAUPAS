@@ -97,6 +97,7 @@ export interface CompanySettings {
   companyAddress: string
   phone: string
   email: string
+  website: string
   bankInfo: string
   invoicePrefix: string
   invoiceCounter: number
@@ -135,6 +136,7 @@ export const defaultSettings: CompanySettings = {
   companyAddress: '',
   phone: '',
   email: '',
+  website: '',
   bankInfo: '',
   invoicePrefix: 'RB',
   invoiceCounter: 1,
