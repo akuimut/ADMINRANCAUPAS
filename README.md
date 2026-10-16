@@ -29,7 +29,7 @@ npm run build:android
 npm run android:open
 ```
 
-Di Android Studio, pilih **Build → Build APK(s)**. Atau jalankan `npm run android:run` dengan emulator/perangkat USB yang siap. Data aplikasi Android terpisah dari data browser; gunakan ekspor/impor backup untuk memindahkannya.
+Di Android Studio, pilih **Build → Build APK(s)**. APK debug bernama `RANCAUPAS.apk` ada di `android/app/build/outputs/apk/debug/`. Atau jalankan `npm run android:run` dengan emulator/perangkat USB yang siap. Data aplikasi Android terpisah dari data browser; gunakan ekspor/impor backup untuk memindahkannya.
 
 ## Data lokal
 

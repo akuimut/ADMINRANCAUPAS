@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">RANCAUPAS BEAUTY</string>
-    <string name="title_activity_main">RANCAUPAS BEAUTY</string>
+    <string name="app_name">RANCAUPAS</string>
+    <string name="title_activity_main">RANCAUPAS</string>
     <string name="package_name">id.rancaupas.beauty</string>
     <string name="custom_url_scheme">id.rancaupas.beauty</string>
 </resources>
