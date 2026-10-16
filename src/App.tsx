@@ -6,6 +6,18 @@ import { createCloudWorkspace, getOwnedCompanyId, resetCloudWorkspaceCache } fro
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import './app-layout.css'
 
+const connectionTimeoutMs = 15_000
+
+function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error(message)), connectionTimeoutMs)
+    promise.then(
+      (value) => { window.clearTimeout(timeout); resolve(value) },
+      (error: unknown) => { window.clearTimeout(timeout); reject(error) },
+    )
+  })
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [checking, setChecking] = useState(true)
@@ -17,10 +29,18 @@ export default function App() {
   useEffect(() => {
     if (!supabase) return
     let active = true
-    void supabase.auth.getSession().then(({ data, error }) => {
+    void withTimeout(
+      supabase.auth.getSession(),
+      'Supabase terlalu lama merespons. Periksa koneksi internet lalu coba masuk lagi.',
+    ).then(({ data, error }) => {
       if (!active) return
       if (error) setErrorMessage(error.message)
+      else setErrorMessage('')
       setSession(data.session)
+      setChecking(false)
+    }).catch((error: unknown) => {
+      if (!active) return
+      setErrorMessage(error instanceof Error ? error.message : 'Sesi Supabase tidak dapat diperiksa.')
       setChecking(false)
     })
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
@@ -36,7 +56,10 @@ export default function App() {
   useEffect(() => {
     if (!userId) return
     let active = true
-    void getOwnedCompanyId().then((id) => {
+    void withTimeout(
+      getOwnedCompanyId(),
+      'Workspace Supabase terlalu lama merespons. Periksa koneksi internet lalu coba lagi.',
+    ).then((id) => {
       if (active) setWorkspaceState(id ? 'ready' : 'setup')
     }).catch((error: unknown) => {
       if (!active) return
