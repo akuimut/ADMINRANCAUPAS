@@ -1,7 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  font-family: "Aptos", "Candara", "Trebuchet MS", sans-serif;
+  font-family: "Aptos", "Segoe UI", "Trebuchet MS", sans-serif;
+  --heading: "Aptos", "Segoe UI", "Trebuchet MS", sans-serif;
   color: #2d2928;
   background: #f5f3f1;
   font-synthesis: none;

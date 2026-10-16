@@ -109,7 +109,7 @@ function AppShell() {
     setModal(null); setEditingProduct(null)
   }
   async function saveManualTransaction(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const form = new FormData(event.currentTarget); const amount = Number(form.get('amount'))
+    event.preventDefault(); const form = new FormData(event.currentTarget); const amount = parseMoneyInput(String(form.get('amount') ?? ''))
     if (!Number.isSafeInteger(amount) || amount <= 0) return notify('Nominal harus berupa angka positif.', 'error')
     await act(() => addTransaction({ date: String(form.get('date')), type: String(form.get('type')) as 'income' | 'expense', category: String(form.get('category')), description: String(form.get('description')).trim(), amount, paymentMethod: String(form.get('method')), notes: String(form.get('notes') ?? '') }), 'Transaksi tersimpan.'); setModal(null)
   }
@@ -134,7 +134,7 @@ function AppShell() {
   }
   async function submitPayment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!paymentInvoice) return
-    const form = new FormData(event.currentTarget); const amount = Number(form.get('amount'))
+    const form = new FormData(event.currentTarget); const amount = parseMoneyInput(String(form.get('amount') ?? ''))
     if (!Number.isSafeInteger(amount) || amount <= 0 || amount > paymentInvoice.balanceDue) return notify('Nominal harus positif dan tidak melebihi sisa tagihan.', 'error')
     await act(() => recordPayment(paymentInvoice, { paymentDate: String(form.get('date')), amount, method: String(form.get('method')), referenceNumber: String(form.get('reference') ?? ''), notes: String(form.get('notes') ?? '') }), 'Pembayaran tercatat.')
     setModal(null); setPaymentInvoice(null)
@@ -448,12 +448,35 @@ function formatMoneyInput(value: number) {
   return value > 0 ? new Intl.NumberFormat('id-ID', { maximumFractionDigits: 0 }).format(value) : ''
 }
 
-function MoneyField({ label, name, value, onChange, required = false }: { label: string; name: string; value: number; onChange: (value: number) => void; required?: boolean }) {
-  return <label className="field"><span>{label}</span><input name={name} type="text" inputMode="numeric" value={formatMoneyInput(value)} onChange={(event) => onChange(parseMoneyInput(event.target.value))} required={required} /></label>
+function QuantityField({ label, name, value, onChange, min, step, required }: { label: string; name: string; value: number; onChange: (value: number) => void; min?: string | number; step?: string | number; required?: boolean }) {
+  const [draft, setDraft] = useState(value > 0 ? String(value) : '')
+  function update(raw: string) {
+    const normalized = raw.replace(',', '.').replace(/[^\d.]/g, '')
+    const separator = normalized.indexOf('.')
+    const whole = (separator < 0 ? normalized : normalized.slice(0, separator)).replace(/^0+(?=\d)/, '')
+    const next = separator < 0 ? whole : `${whole || '0'}.${normalized.slice(separator + 1).replace(/\./g, '').slice(0, 2)}`
+    setDraft(next)
+    const numeric = Number(next)
+    onChange(Number.isFinite(numeric) ? numeric : 0)
+  }
+  return <label className="field"><span>{label}</span><input name={name} type="text" inputMode="decimal" value={draft} min={min} step={step} required={required} onChange={(event) => update(event.target.value)} onBlur={() => { const numeric = Number(draft); if (Number.isFinite(numeric)) { setDraft(numeric > 0 ? String(numeric) : ''); onChange(numeric) } }} /></label>
+}
+
+function MoneyField({ label, name, value, defaultValue, onChange, required = false }: { label: string; name: string; value?: number; defaultValue?: number | string; onChange?: (value: number) => void; required?: boolean }) {
+  const [draft, setDraft] = useState(() => formatMoneyInput(value ?? parseMoneyInput(String(defaultValue ?? ''))))
+  const display = value === undefined ? draft : formatMoneyInput(value)
+  function update(raw: string) {
+    const numeric = parseMoneyInput(raw)
+    setDraft(raw.trim() ? formatMoneyInput(numeric) : '')
+    onChange?.(numeric)
+  }
+  return <label className="field"><span>{label}</span><input name={name} type="text" inputMode="numeric" value={display} onChange={(event) => update(event.target.value)} required={required} /></label>
 }
 
 function Field({ label, name, type = 'text', defaultValue, value, required, wide, min, max, step, maxLength, placeholder, onChange }: { label: string; name: string; type?: string; defaultValue?: string | number; value?: string | number; required?: boolean; wide?: boolean; min?: string | number; max?: string | number; step?: string | number; maxLength?: number; placeholder?: string; onChange?: (event: ChangeEvent<HTMLInputElement>) => void }) {
   const multiline = ['address', 'notes', 'bankInfo', 'terms'].includes(name)
+  if (name.startsWith('qty-')) return <QuantityField label={label} name={name} value={Number(value ?? defaultValue ?? 0)} min={min} step={step} required={required} onChange={(quantity) => onChange?.({ target: { value: String(quantity) } } as ChangeEvent<HTMLInputElement>)} />
+  if (name === 'amount') return <MoneyField label={label} name={name} defaultValue={defaultValue} required={required} />
   return <label className={`field ${wide ? 'field-wide' : ''}`}><span>{label}</span>{multiline ? <textarea name={name} defaultValue={defaultValue} value={value} required={required} placeholder={placeholder} maxLength={maxLength} /> : <input name={name} type={type} defaultValue={defaultValue} value={value} required={required} min={min} max={max} step={step} maxLength={maxLength} placeholder={placeholder} onChange={onChange} />}</label>
 }
 
