@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { App as CapacitorApp } from '@capacitor/app'
 import { Capacitor } from '@capacitor/core'
 import { Activity, ArrowDownLeft, ArrowDownRight, ArrowUpRight, BarChart3, Bell, Boxes, CalendarDays, Check, CircleDollarSign, ClipboardList, Download, FileDown, FileText, LayoutDashboard, Menu, Moon, MoreHorizontal, Package, Plus, Search, Settings2, ShieldCheck, ShoppingBag, Sun, Trash2, TrendingUp, Users, Wallet, X } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -50,17 +51,39 @@ function AppShell({ onSignOut }: { onSignOut: () => void }) {
   }
   useEffect(() => {
     let active = true
+    let loadInProgress = false
+    let removeAppStateListener: (() => Promise<void>) | undefined
     async function load() {
+      if (loadInProgress) return
+      loadInProgress = true
       try {
         const workspace = await loadCloudWorkspace()
         if (!active) return
         setCustomers(workspace.customers); setProducts(workspace.products); setInvoices(workspace.invoices)
         setTransactions(workspace.transactions); setSettings(workspace.settings)
       } catch (error) { if (active) setToast({ message: error instanceof Error ? error.message : 'Data Supabase tidak dapat dimuat.', kind: 'error' }) }
-      finally { if (active) setLoading(false) }
+      finally { loadInProgress = false; if (active) setLoading(false) }
+    }
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') void load()
+    }
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    if (Capacitor.isNativePlatform()) {
+      void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+        if (isActive) void load()
+      }).then((listener) => {
+        if (active) removeAppStateListener = () => listener.remove()
+        else void listener.remove()
+      }).catch((error: unknown) => {
+        if (active) setToast({ message: error instanceof Error ? error.message : 'Status aplikasi tidak dapat dipantau.', kind: 'error' })
+      })
     }
     void load()
-    return () => { active = false }
+    return () => {
+      active = false
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+      if (removeAppStateListener) void removeAppStateListener()
+    }
   }, [])
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(null), 3600); return () => window.clearTimeout(timer) }, [toast])
   useEffect(() => {
